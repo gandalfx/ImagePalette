@@ -9,7 +9,7 @@
  */
 
 namespace Bfoxwell\ImagePalette;
-require_once('ColorUtil.php');
+require_once('Color.php');
 
 use Bfoxwell\ImagePalette\Exception\UnsupportedFileTypeException;
 use Imagick;
@@ -117,10 +117,12 @@ class ImagePalette implements \IteratorAggregate
     );
     
     /**
-     * Colors hits, keys are colors from whiteList
+     * Colors that were found to be prominent
+     * Array of Color objects
+     * 
      * @var array
      */
-    protected $whiteListHits;
+    protected $palette;
     
     /**
      * Library used
@@ -144,19 +146,22 @@ class ImagePalette implements \IteratorAggregate
         // use provided libname or auto-detect
         $this->lib = $overrideLib ? $overrideLib : $this->detectLib();
         
-        $this->whiteList = array_map('Bfoxwell\ImagePalette\ColorUtil::expand', $this->whiteList);
-        
-        // creates an array with our colors as keys
-        $this->whiteListHits = array_fill_keys($this->whiteList, 0);
+        // create an array with color ints as keys
+        $this->whiteList = array_fill_keys($this->whiteList, 0);
         
         // go!
         $this->process($this->lib);
         
-        // sort color-keyed array by hits
-        arsort($this->whiteListHits);
+        // sort whiteList
+        arsort($this->whiteList);
         
         // sort whiteList accordingly
-        $this->whiteList = array_keys($this->whiteListHits);
+        $this->palette = array_map(
+            function($color) {
+                return new Color($color);
+            },
+            array_keys($this->whiteList)
+        );
     }
 
 
@@ -306,15 +311,45 @@ class ImagePalette implements \IteratorAggregate
             // Column
             for ($y = 0; $y < $this->height; $y += $this->precision) {
                 
-                list($rgba, $r, $g, $b) = $this->getPixelColor($x, $y);
+                $color = $this->getPixelColor($x, $y);
                 
                 // transparent pixels don't really have a color
-                if (ColorUtil::isTransparent($rgba))
+                if ($color->isTransparent())
                     continue 1;
                 
-                $this->whiteListHits[ $this->getClosestColor($r, $g, $b) ]++;
+                // increment closes whiteList color (key)
+                $this->whiteList[ $this->getClosestColor($color) ]++;
             }
         }
+    }
+    
+    /**
+     * Get closest matching color
+     * 
+     * @param Color $color
+     * @return int
+     */
+    protected function getClosestColor(Color $color)
+    {
+        
+        $bestDiff = PHP_INT_MAX;
+        
+        // default to black so hhvm won't cry
+        $bestColor = 0x000000;
+        
+        foreach ($this->whiteList as $wlColor => $hits) {
+            
+            // calculate difference (don't sqrt)
+            $diff = $color->getDiff($wlColor);
+            
+            // see if we got a new best
+            if ($diff < $bestDiff) {
+                $bestDiff = $diff;
+                $bestColor = $wlColor;
+            }
+        }
+        
+        return $bestColor;
     }
     
     /**
@@ -326,7 +361,7 @@ class ImagePalette implements \IteratorAggregate
      * 
      * @param  int $x
      * @param  int $y
-     * @return array
+     * @return Color
      */
     protected function getPixelColor($x, $y)
     {
@@ -339,18 +374,18 @@ class ImagePalette implements \IteratorAggregate
      * @see  getPixelColor()
      * @param  int $x
      * @param  int $y
-     * @return array
+     * @return Color
      */
     protected function getPixelColorGD($x, $y)
     {
         $color = imagecolorat($this->loadedImage, $x, $y);
-        $rgb = imagecolorsforindex($this->loadedImage, $color);
+        // $rgb = imagecolorsforindex($this->loadedImage, $color);
         
-        return array(
-            $color,
-            $rgb['red'],
-            $rgb['green'],
-            $rgb['blue']
+        return new Color (
+            $color
+            // $rgb['red'],
+            // $rgb['green'],
+            // $rgb['blue']
         );
     }
     
@@ -360,18 +395,17 @@ class ImagePalette implements \IteratorAggregate
      * @see  getPixelColor()
      * @param  int $x
      * @param  int $y
-     * @return array
+     * @return Color
      */
     protected function getPixelColorImagick($x, $y)
     {
         $rgb = $this->loadedImage->getImagePixelColor($x,$y)->getColor();
         
-        return array(
-            $this->rgbToColor($rgb['r'], $rgb['g'], $rgb['b']),
+        return new Color(array(
             $rgb['r'],
             $rgb['g'],
-            $rgb['b']
-        );
+            $rgb['b'],
+        ));
     }
 
     protected function getPixelColorGmagick($x, $y)
@@ -381,48 +415,12 @@ class ImagePalette implements \IteratorAggregate
     }
     
     /**
-     * Get closest matching color
-     * 
-     * @param $r
-     * @param $g
-     * @param $b
-     * @return mixed
-     */
-    protected function getClosestColor($r, $g, $b)
-    {
-        
-        $bestKey = 0;
-        $bestDiff = PHP_INT_MAX;
-        $whiteListLength = count($this->whiteList);
-        
-        for ( $i = 0 ; $i < $whiteListLength ; $i++ ) {
-            
-            // get whitelisted values
-            list($wlr, $wlg, $wlb) = ColorUtil::intToRgb($this->whiteList[$i]);
-            
-            // calculate difference (don't sqrt)
-            $diff = pow($r - $wlr, 2)
-                  + pow($g - $wlg, 2)
-                  + pow($b - $wlb, 2);
-            
-            // see if we got a new best
-            if ($diff < $bestDiff) {
-                $bestDiff = $diff;
-                $bestKey = $i;
-            }
-        }
-        
-        return $this->whiteList[$bestKey];
-    }
-    
-    /**
-     * Returns the color palette as an array containing
-     * an integer for each color
+     * Returns an array of Color objects
      * 
      * @param  int $paletteLength
-     * @return int
+     * @return array
      */
-    public function getIntColors($paletteLength = null)
+    public function getColors($paletteLength = null)
     {
         // allow custom length calls
         if (!is_numeric($paletteLength)) {
@@ -430,64 +428,7 @@ class ImagePalette implements \IteratorAggregate
         }
         
         // take the best hits
-        return array_slice($this->whiteList, 0, $paletteLength, true);
-    }
-    
-    /**
-     * Returns the color palette as an array containing
-     * each color as an array of red, green and blue values
-     * 
-     * @param  int $paletteLength
-     * @return array
-     */
-    public function getRgbColors($paletteLength = null)
-    {
-        return array_map(
-            'Bfoxwell\ImagePalette\ColorUtil::intToRgb',
-            $this->getIntColors($paletteLength)
-        );
-    }
-    
-    /**
-     * Returns the color palette as an array containing
-     * hexadecimal string representations, like '#abcdef'
-     * 
-     * @param  int $paletteLength
-     * @return array
-     */
-    public function getHexStringColors($paletteLength = null)
-    {
-        return array_map(
-            'Bfoxwell\ImagePalette\ColorUtil::intToHexString',
-            $this->getIntColors($paletteLength)
-        );
-    }
-    
-    /**
-     * Returns the color palette as an array containing
-     * decimal string representations, like 'rgb(123,0,20)'
-     * 
-     * @param  int $paletteLength
-     * @return array
-     */
-    public function getRgbStringColors($paletteLength = null)
-    {
-        return array_map(
-            'Bfoxwell\ImagePalette\ColorUtil::rgbToString',
-            $this->getRgbColors($paletteLength)
-        );
-    }
-    
-    /**
-     * Alias for getHexStringColors for legacy support.
-     * 
-     * @deprecated  use one of the newer getters
-     * @param  int $paletteLength
-     * @return array
-     */
-    public function getColors($paletteLength = null)
-    {
-        return $this->getHexStringColors($paletteLength);
+        return array_slice($this->palette, 0, $paletteLength, true);
     }
     
     /**
@@ -497,7 +438,13 @@ class ImagePalette implements \IteratorAggregate
      */
     public function __toString()
     {
-        return json_encode($this->getHexStringColors());
+        // Color PHP 5.3 compatible -> not JsonSerializable :(
+        return json_encode(array_map(
+            function($color) {
+                return (string) $color;
+            },
+            $this->getColors()
+        ));
     }
     
     /**
